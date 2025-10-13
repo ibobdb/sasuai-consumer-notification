@@ -47,6 +47,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
           build-args: |
             GIT_TAG=${{ env.LATEST_TAG }}
+            RABBIT_URL=${{ secrets.RABBIT_URL }}
             NODE_ENV=production
 
   deploy:
