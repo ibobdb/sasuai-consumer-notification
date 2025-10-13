@@ -47,7 +47,6 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
           build-args: |
             GIT_TAG=${{ env.LATEST_TAG }}
-            RABBIT_URL=${{ secrets.RABBIT_URL }}
             NODE_ENV=production
 
   deploy:
@@ -67,5 +66,7 @@ jobs:
             docker rm sasuai-consumer-notification || true
             docker run -d \
               --name sasuai-consumer-notification \
+              -e RABBIT_URL=${{ secrets.RABBIT_URL }} \
+              -e NODE_ENV=production \
               --network caddy_network \
               ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
