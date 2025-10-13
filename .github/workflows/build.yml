@@ -1,0 +1,70 @@
+name: Docker Build, Push, and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_build:
+        description: 'Skip build and deploy latest image?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  build:
+    if: github.event.inputs.skip_build != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Latest Tag
+        id: get-latest-tag
+        run: |
+          if git describe --tags --abbrev=0 > /dev/null 2>&1; then
+            echo "LATEST_TAG=$(git describe --tags --abbrev=0)" >> $GITHUB_ENV
+          else
+            echo "LATEST_TAG=0.0.1" >> $GITHUB_ENV  # Default if no tags exist
+          fi
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:${{ env.LATEST_TAG }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
+          build-args: |
+            GIT_TAG=${{ env.LATEST_TAG }}
+            NODE_ENV=production
+
+  deploy:
+    needs: build
+    if: always() && (needs.build.result == 'success' || github.event.inputs.skip_build == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          script: |
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
+            docker stop sasuai-consumer-notification || true
+            docker rm sasuai-consumer-notification || true
+            docker run -d \
+              --name sasuai-consumer-notification \
+              --network caddy_net \
+              ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
