@@ -13,6 +13,5 @@ export interface ApiResponse {
 export interface Config {
   rabbitUrl: string;
   queueName: string;
-  apiKey: string;
   apiUrl: string;
 }

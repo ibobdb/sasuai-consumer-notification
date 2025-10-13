@@ -3,11 +3,9 @@ import { MessagePayload, ApiResponse } from '../types';
 
 export class ApiService {
   private apiUrl: string;
-  private apiKey: string;
 
   constructor() {
     this.apiUrl = config.apiUrl;
-    this.apiKey = config.apiKey;
   }
 
   async sendMessage(payload: MessagePayload): Promise<ApiResponse> {
