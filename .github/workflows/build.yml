@@ -66,5 +66,5 @@ jobs:
             docker rm sasuai-consumer-notification || true
             docker run -d \
               --name sasuai-consumer-notification \
-              --network caddy_net \
+              --network caddy_network \
               ${{ secrets.DOCKERHUB_USERNAME }}/sasuai-consumer-notification:latest
