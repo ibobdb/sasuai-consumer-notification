@@ -3,7 +3,6 @@ import { config } from '../config';
 import { MessagePayload } from '../types';
 import { ApiService } from './api.services';
 
-// Type definitions untuk memastikan compatibility
 type AmqpConnection = any;
 type AmqpChannel = any;
 type ConsumeMessage = any;
@@ -13,6 +12,10 @@ export class RabbitMQService {
   private channel: AmqpChannel | null = null;
   private apiService: ApiService;
   private isConnecting: boolean = false;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 10;
+  private reconnectDelay: number = 5000; // 5 detik
 
   constructor() {
     this.apiService = new ApiService();
@@ -31,7 +34,10 @@ export class RabbitMQService {
     this.isConnecting = true;
 
     try {
-      this.connection = await amqplib.connect(config.rabbitUrl);
+      // Set heartbeat untuk keep connection alive
+      this.connection = await amqplib.connect(config.rabbitUrl, {
+        heartbeat: 60, // heartbeat setiap 60 detik
+      });
 
       if (!this.connection) {
         throw new Error('Failed to establish connection');
@@ -43,24 +49,22 @@ export class RabbitMQService {
         throw new Error('Failed to create channel');
       }
 
+      // Set prefetch untuk control message consumption
+      await this.channel.prefetch(1);
       await this.channel.assertQueue(config.queueName, { durable: true });
 
       console.log(
         `📥 Connected to RabbitMQ - Waiting for messages in queue: ${config.queueName}`
       );
 
-      // Handle connection errors
-      this.connection.on('error', (err: Error) => {
-        console.error('❌ RabbitMQ connection error:', err.message);
-        this.connection = null;
-        this.channel = null;
-      });
+      // Reset reconnect attempts on successful connection
+      this.reconnectAttempts = 0;
 
-      this.connection.on('close', () => {
-        console.log('🔌 RabbitMQ connection closed');
-        this.connection = null;
-        this.channel = null;
-      });
+      // Setup event handlers
+      this.setupConnectionHandlers();
+
+      // Start heartbeat monitoring
+      this.startHeartbeat();
     } catch (error) {
       console.error('❌ Failed to connect to RabbitMQ:', error);
       this.connection = null;
@@ -68,6 +72,89 @@ export class RabbitMQService {
       throw error;
     } finally {
       this.isConnecting = false;
+    }
+  }
+
+  private setupConnectionHandlers(): void {
+    if (!this.connection) return;
+
+    this.connection.on('error', async (err: Error) => {
+      console.error('❌ RabbitMQ connection error:', err.message);
+      this.connection = null;
+      this.channel = null;
+      this.stopHeartbeat();
+
+      // Attempt to reconnect
+      await this.attemptReconnect();
+    });
+
+    this.connection.on('close', async () => {
+      console.log('🔌 RabbitMQ connection closed');
+      this.connection = null;
+      this.channel = null;
+      this.stopHeartbeat();
+
+      // Attempt to reconnect
+      await this.attemptReconnect();
+    });
+  }
+
+  private async attemptReconnect(): Promise<void> {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('❌ Max reconnection attempts reached. Giving up.');
+      process.exit(1);
+    }
+
+    this.reconnectAttempts++;
+    console.log(
+      `🔄 Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, this.reconnectDelay));
+
+    try {
+      await this.connect();
+      await this.startConsuming();
+      console.log('✅ Reconnected successfully!');
+    } catch (error) {
+      console.error('❌ Reconnection failed:', error);
+      await this.attemptReconnect();
+    }
+  }
+
+  private startHeartbeat(): void {
+    // Stop existing heartbeat if any
+    this.stopHeartbeat();
+
+    // Send periodic heartbeat (setiap 5 menit)
+    this.heartbeatInterval = setInterval(() => {
+      if (this.isConnected()) {
+        console.log('💓 Heartbeat - Connection alive');
+
+        // Optional: Check queue stats untuk memastikan channel masih aktif
+        this.checkQueueHealth();
+      }
+    }, 5 * 60 * 1000); // 5 menit
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  private async checkQueueHealth(): Promise<void> {
+    try {
+      if (this.channel) {
+        await this.channel.checkQueue(config.queueName);
+      }
+    } catch (error) {
+      console.error('❌ Queue health check failed:', error);
+      // Trigger reconnection
+      this.connection = null;
+      this.channel = null;
+      await this.attemptReconnect();
     }
   }
 
@@ -153,24 +240,23 @@ export class RabbitMQService {
         err instanceof Error ? err.message : err
       );
 
-      // Re-check channel before nack operation
       const currentChannel = this.channel;
       if (currentChannel) {
-        // Option 1: Reject without requeue (sends to DLQ if configured)
-        // currentChannel.nack(msg, false, false);
-        // Option 2: Reject with requeue (will retry immediately)
-        // currentChannel.nack(msg, false, true);
-        // Current behavior: Don't ack, message stays in queue
+        // Reject with requeue for transient errors
+        currentChannel.nack(msg, false, true);
       }
     }
   }
 
   async close(): Promise<void> {
     const errors: Error[] = [];
+
+    // Stop heartbeat
+    this.stopHeartbeat();
+
     const channel = this.channel;
     const connection = this.connection;
 
-    // Close channel first
     if (channel) {
       try {
         await channel.close();
@@ -182,7 +268,6 @@ export class RabbitMQService {
       }
     }
 
-    // Then close connection
     if (connection) {
       try {
         await connection.close();
@@ -205,20 +290,15 @@ export class RabbitMQService {
     }
   }
 
-  // Helper method to check connection status
   isConnected(): boolean {
     return this.connection !== null && this.channel !== null;
   }
 
-  // Graceful shutdown
   async gracefulShutdown(): Promise<void> {
     console.log('🛑 Initiating graceful shutdown...');
 
     try {
-      // Wait a bit for current messages to finish processing
       await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Close connections
       await this.close();
     } catch (error) {
       console.error('❌ Error during graceful shutdown:', error);
@@ -226,7 +306,6 @@ export class RabbitMQService {
     }
   }
 
-  // Get channel for advanced operations (with null check)
   getChannel(): AmqpChannel {
     const channel = this.channel;
     if (!channel) {
@@ -235,7 +314,6 @@ export class RabbitMQService {
     return channel;
   }
 
-  // Get connection for advanced operations (with null check)
   getConnection(): AmqpConnection {
     const connection = this.connection;
     if (!connection) {

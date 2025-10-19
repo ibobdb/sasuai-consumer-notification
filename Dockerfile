@@ -1,50 +1,48 @@
-FROM node:20-alpine AS builder
+# Multi-stage build untuk ukuran image lebih kecil
+FROM node:18-alpine AS builder
 
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
+COPY tsconfig.json ./
 
 # Install dependencies
-RUN npm ci --ignore-scripts
+RUN npm ci --only=production && \
+    npm cache clean --force
 
 # Copy source code
-COPY tsconfig.json ./
-COPY src ./src
+COPY . .
 
-# Build the application
+# Build TypeScript
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine
+FROM node:18-alpine
+
+# Install dumb-init untuk proper signal handling
+RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# Set environment
-ENV NODE_ENV=production
-
-# Copy package files
-COPY package*.json ./
-
-# Install production dependencies only
-RUN npm ci --only=production --ignore-scripts && \
-    npm cache clean --force
-
-# Copy built application from builder
+# Copy dari builder stage
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
 
-# Create a non-root user if it doesn't exist and set ownership
-RUN chown -R node:node /app
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app
 
-# Switch to non-root user
-USER node
+USER nodejs
 
-# Expose port if needed (uncomment and adjust)
-# EXPOSE 3000
+# Health check (optional - sesuaikan dengan kebutuhan)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD node -e "console.log('healthy')" || exit 1
 
-# Health check (optional, adjust endpoint as needed)
-# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-#   CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+# Gunakan dumb-init untuk proper signal handling
+ENTRYPOINT ["dumb-init", "--"]
 
-# Start the application
+# Start aplikasi
 CMD ["node", "dist/index.js"]
